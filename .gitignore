@@ -1,0 +1,9 @@
+# Geschäftsunterlagen / private Dokumente - nicht veröffentlichen
+Businessplan/
+*.pdf
+*.docx
+*.cer
+Chat-Zusammenfassung.md
+Plan_Kalkulation-Angebotserstellung.md
+.claude/
+.DS_Store
