@@ -20,6 +20,10 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; padding: 0; }
+/* Muss nach allen anderen Regeln stehen: einzelne Klassen wie .field setzen
+   display selbst (gleiche Spezifität wie [hidden]) und würden es sonst je
+   nach Deklarationsreihenfolge überschreiben. */
+[hidden] { display: none !important; }
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   background: var(--bg);

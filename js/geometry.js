@@ -18,7 +18,11 @@
     'a4':   { label: 'DIN A4 (Blatt, 4 Ecken)', type: 'rect', dims: [210, 297] },
     'a3':   { label: 'DIN A3 (Blatt, 4 Ecken)', type: 'rect', dims: [297, 420] },
     'a5':   { label: 'DIN A5 (Blatt, 4 Ecken)', type: 'rect', dims: [148, 210] },
-    'card': { label: 'EC-/Kreditkarte (lange Seite)', type: 'line', mm: 85.60 }
+    'card': { label: 'EC-/Kreditkarte (lange Seite)', type: 'line', mm: 85.60 },
+    // mm === null => Länge kommt nicht aus dieser Tabelle, sondern wird vom
+    // Nutzer eingegeben (z. B. eine bemaßte Strecke auf einem Grundriss/Plan,
+    // wo kein A4-Blatt im Bild liegt). Siehe calcMmPerPx in app.js.
+    'custom': { label: 'Bekannte Strecke (Länge selbst eingeben)', type: 'line', mm: null }
   };
   Geo.DEFAULT_REFERENCE = 'a4';
 
@@ -128,22 +132,35 @@
    */
   Geo.checkPlausibility = function (m, objectType) {
     var issues = [];
-    var widthSkew = Geo.pctDiff(m.topMm, m.bottomMm);
-    var heightSkew = Geo.pctDiff(m.leftMm, m.rightMm);
-    var diagSkew = Geo.pctDiff(m.diag1Mm, m.diag2Mm);
+    // Manuell erfasste (synthetic) Ergebnisse aus dem Neubau-Pfad (a) haben
+    // kein Foto und damit keine Kantenlängen top/bottom/left/rightMm bzw.
+    // Diagonalen – Schiefe lässt sich dafür grundsätzlich nicht bestimmen.
+    // Früher Guard statt NaN-Werten (siehe Erweiterungsplan_Visualisierung_
+    // Neubau.pdf, Abschnitt „Notwendiger Guard").
+    var hasSkewData = m.topMm != null && m.bottomMm != null &&
+      m.leftMm != null && m.rightMm != null && m.diag1Mm != null && m.diag2Mm != null;
+    var widthSkew = 0, heightSkew = 0, diagSkew = 0;
 
-    if (diagSkew > 3) {
-      issues.push({
-        level: diagSkew > 8 ? 'error' : 'warn',
-        msg: 'Diagonalen weichen um ' + diagSkew.toFixed(1) +
-             ' % ab – Aufnahme vermutlich schräg. Handy parallel zur Fensterfläche halten und neu fotografieren.'
-      });
-    }
-    if (widthSkew > 4) {
-      issues.push({ level: 'warn', msg: 'Ober- und Unterkante unterschiedlich lang (' + widthSkew.toFixed(1) + ' %) – Verkippung nach oben/unten.' });
-    }
-    if (heightSkew > 4) {
-      issues.push({ level: 'warn', msg: 'Linke und rechte Kante unterschiedlich lang (' + heightSkew.toFixed(1) + ' %) – Verkippung zur Seite.' });
+    if (hasSkewData) {
+      widthSkew = Geo.pctDiff(m.topMm, m.bottomMm);
+      heightSkew = Geo.pctDiff(m.leftMm, m.rightMm);
+      diagSkew = Geo.pctDiff(m.diag1Mm, m.diag2Mm);
+
+      if (diagSkew > 3) {
+        issues.push({
+          level: diagSkew > 8 ? 'error' : 'warn',
+          msg: 'Diagonalen weichen um ' + diagSkew.toFixed(1) +
+               ' % ab – Aufnahme vermutlich schräg. Handy parallel zur Fensterfläche halten und neu fotografieren.'
+        });
+      }
+      if (widthSkew > 4) {
+        issues.push({ level: 'warn', msg: 'Ober- und Unterkante unterschiedlich lang (' + widthSkew.toFixed(1) + ' %) – Verkippung nach oben/unten.' });
+      }
+      if (heightSkew > 4) {
+        issues.push({ level: 'warn', msg: 'Linke und rechte Kante unterschiedlich lang (' + heightSkew.toFixed(1) + ' %) – Verkippung zur Seite.' });
+      }
+    } else if (m.synthetic) {
+      issues.push({ level: 'ok', msg: 'Manuell erfasstes Maß ohne Foto – Schiefe-/Plausibilitätsprüfung entfällt.' });
     }
 
     if (objectType === 'door') {
@@ -166,8 +183,8 @@
       }
     }
 
-    // Score: startet bei 100, Abzug je nach Schiefe.
-    var penalty = Math.min(60, diagSkew * 4 + widthSkew * 2 + heightSkew * 2);
+    // Score: startet bei 100, Abzug je nach Schiefe (nur wenn Schiefe-Daten vorliegen).
+    var penalty = hasSkewData ? Math.min(60, diagSkew * 4 + widthSkew * 2 + heightSkew * 2) : 0;
     var score = Math.max(0, Math.round(100 - penalty));
     if (issues.some(function (i) { return i.level === 'error'; })) score = Math.min(score, 40);
 

@@ -45,6 +45,35 @@
     App.state.picker = null;
   }
 
+  /** Leichtgewichtige ID, u. a. für planGroupId (Gruppierung Neubau-Pfad b). */
+  function uid() {
+    return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  /**
+   * Schneidet aus dem Picker-Canvas (Foto + eingezeichnete Ecken) nur den
+   * Bereich um die vier Ecken aus (statt das komplette Planfoto je Fenster
+   * erneut zu speichern) — schont das 5-MB-localStorage-Limit beim Neubau-
+   * Pfad (b), wo mehrere Fenster auf demselben Planfoto markiert werden.
+   * corners sind Bildpixel-Koordinaten (wie von Picker geliefert); scale
+   * rechnet sie in Canvas-Pixel um (Picker.view.scale).
+   */
+  function cropCompositeFromCanvas(cv, corners, scale, marginPx) {
+    marginPx = marginPx == null ? 40 : marginPx;
+    var xs = corners.map(function (p) { return p.x * scale; });
+    var ys = corners.map(function (p) { return p.y * scale; });
+    var minX = Math.max(0, Math.min.apply(null, xs) - marginPx);
+    var minY = Math.max(0, Math.min.apply(null, ys) - marginPx);
+    var maxX = Math.min(cv.width, Math.max.apply(null, xs) + marginPx);
+    var maxY = Math.min(cv.height, Math.max.apply(null, ys) + marginPx);
+    var w = Math.max(1, Math.round(maxX - minX));
+    var h = Math.max(1, Math.round(maxY - minY));
+    var out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    out.getContext('2d').drawImage(cv, minX, minY, w, h, 0, 0, w, h);
+    return out.toDataURL('image/jpeg', 0.72);
+  }
+
   /* ----------------- Navigation ----------------- */
 
   App.go = function (screen, params, opts) {
@@ -135,10 +164,17 @@
     App.state.wiz = {
       target: target,                 // {mode:'kunde'|'pro', projectId}
       objectType: App.DEFAULT_OBJECT_TYPE,
+      fensterart: null,               // nur bei Fenstern: 'kunststoff'|'holz'|... (Pflichtfeld, Mensch)
+      // 'foto' (Standard, wie bisher) | null (Sentinel: Neubau-Wahl noch offen,
+      // siehe Screens.buildMode) | 'manual' (Pfad a) | 'plan' (Pfad b) —
+      // orthogonal zu objectType/target.mode, siehe Erweiterungsplan Phase 1b.
+      captureMode: 'foto',
+      planGroupId: null, planCount: 0, // nur Pfad (b): gemeinsame Gruppe je Planfoto-Session
       img: null,
       referenceKey: Geo.DEFAULT_REFERENCE,
-      refPts: [], mmPerPx: null,
-      corners: [], result: null, composite: null
+      refPts: [], mmPerPx: null, customRefMm: null,
+      corners: [], result: null, composite: null,
+      imgW: null, imgH: null
     };
   }
 
@@ -184,6 +220,22 @@
     }
   };
 
+  /**
+   * Fensterart (Werkstoff): bewusst kein KI-Merkmal, immer manuelle Auswahl
+   * (siehe Konzept_Fensterart-und-Fenstertyp-Erkennung.md, Abschnitt 5) —
+   * Werkstoffe sind auf Fotos oft nicht zuverlässig unterscheidbar und die
+   * Fensterart ist Grundlage der späteren Kalkulation/Preisliste.
+   */
+  var FENSTERART_OPTIONS = {
+    kunststoff: { label: 'Kunststoff', desc: 'Preisliste vorhanden.' },
+    holz: { label: 'Holz', desc: 'Preisliste noch nicht digitalisiert.' },
+    'holz-alu': { label: 'Holz-Aluminium', desc: 'Preisliste noch nicht digitalisiert.' },
+    aluminium: { label: 'Aluminium', desc: 'Preisliste noch nicht digitalisiert.' },
+    stahl: { label: 'Stahl', desc: 'Preisliste noch nicht digitalisiert.' },
+    sonstige: { label: 'Sonstige', desc: '' }
+  };
+  App.DEFAULT_FENSTERART = 'kunststoff';
+
   /** Formularblock für türspezifische Zusatzfelder (Anschlag, Schwelle, Zargentiefe, DIN-Richtung). */
   function doorFieldsHtml(prefix) {
     return '' +
@@ -222,6 +274,13 @@
    */
   function windowFieldsHtml(prefix, wf) {
     wf = wf || Visualize.DEFAULT_WINDOW_FIELDS;
+    // Fensterart: bereits auf dem eigenen Auswahlscreen gewählt (App.state.wiz.fensterart);
+    // beim nachträglichen Bearbeiten (wf.fensterart) hat der gespeicherte Wert Vorrang.
+    var currentFensterart = wf.fensterart || (App.state.wiz && App.state.wiz.fensterart) || App.DEFAULT_FENSTERART;
+    var fensterartOpts = Object.keys(FENSTERART_OPTIONS).map(function (k) {
+      var sel = k === currentFensterart ? ' selected' : '';
+      return '<option value="' + k + '"' + sel + '>' + esc(FENSTERART_OPTIONS[k].label) + '</option>';
+    }).join('');
     var openingOpts = Object.keys(Visualize.OPENING_TYPES).map(function (k) {
       var sel = k === wf.openingType ? ' selected' : '';
       return '<option value="' + k + '"' + sel + '>' + esc(Visualize.OPENING_TYPES[k].label) + '</option>';
@@ -234,6 +293,7 @@
     var mullH = (wf.mullions && wf.mullions.h) || 0, mullV = (wf.mullions && wf.mullions.v) || 0;
     return '' +
       '<div class="meta-form window-fields">' +
+        '<label class="field"><span>Fensterart</span><select id="' + prefix + 'WMaterial">' + fensterartOpts + '</select></label>' +
         '<div class="two">' +
           '<label class="field"><span>Öffnungsart</span><select id="' + prefix + 'WOpening">' + openingOpts + '</select></label>' +
           '<label class="field"><span>Flügelzahl</span><select id="' + prefix + 'WSash">' + sashOpts + '</select></label>' +
@@ -258,6 +318,7 @@
     var mullH = parseInt(document.getElementById(prefix + 'WMullH').value, 10);
     var mullV = parseInt(document.getElementById(prefix + 'WMullV').value, 10);
     return {
+      fensterart: document.getElementById(prefix + 'WMaterial').value,
       sashCount: parseInt(document.getElementById(prefix + 'WSash').value, 10) || 1,
       openingType: document.getElementById(prefix + 'WOpening').value,
       hingeSide: document.getElementById(prefix + 'WHinge').value,
@@ -359,10 +420,142 @@
     mount: function () {
       view.querySelectorAll('.mode').forEach(function (b) {
         b.onclick = function () {
-          App.state.wiz.objectType = b.dataset.type;
-          App.go(App.state.wiz.target.mode === 'kunde' ? 'kundeIntro' : 'capture');
+          var w = App.state.wiz;
+          w.objectType = b.dataset.type;
+          if (b.dataset.type === 'window') { App.go('fensterart'); return; }
+          if (w.captureMode === null) { App.go('buildMode'); return; }
+          App.go(w.target.mode === 'kunde' ? 'kundeIntro' : 'capture');
         };
       });
+    }
+  };
+
+  /* -------- Fensterart wählen (nur bei Fenstern, Pflichtfeld, immer Mensch) -------- */
+  Screens.fensterart = {
+    title: function () { return 'Welche Fensterart?'; },
+    html: function () {
+      return '' +
+        '<p class="instruct">Der Werkstoff bestimmt die spätere Preisliste – bitte auswählen. ' +
+          'Das kann die App nicht zuverlässig aus einem Foto erkennen.</p>' +
+        '<div class="cards">' +
+          Object.keys(FENSTERART_OPTIONS).map(function (key) {
+            var t = FENSTERART_OPTIONS[key];
+            return '<button class="card mode" data-fensterart="' + key + '">' +
+              '<span class="card-t">' + esc(t.label) + '</span>' +
+              (t.desc ? '<span class="card-d">' + esc(t.desc) + '</span>' : '') +
+            '</button>';
+          }).join('') +
+        '</div>';
+    },
+    mount: function () {
+      view.querySelectorAll('.mode').forEach(function (b) {
+        b.onclick = function () {
+          var w = App.state.wiz;
+          w.fensterart = b.dataset.fensterart;
+          if (w.captureMode === null) { App.go('buildMode'); return; }
+          App.go(w.target.mode === 'kunde' ? 'kundeIntro' : 'capture');
+        };
+      });
+    }
+  };
+
+  /**
+   * -------- Neubau/Anbau: Weg wählen (nur Profi-Modus, siehe Screens.project) --------
+   * Erreicht nur, wenn wiz.captureMode === null (Sentinel), gesetzt vom
+   * „+ Neubau/Planung"-Button statt dem normalen „+ Aufmaß"-Button.
+   */
+  Screens.buildMode = {
+    title: function () { return 'Neubau/Planung'; },
+    html: function () {
+      return '' +
+        '<p class="instruct">Noch kein Fenster/keine Tür vorhanden? Für Neubau oder Anbau lassen sich ' +
+          'Maße auch ohne Foto erfassen.</p>' +
+        '<div class="cards">' +
+          '<button class="card mode" data-build="manual">' +
+            '<span class="card-ic">⌨️</span><span class="card-t">Maße manuell eingeben</span>' +
+            '<span class="card-d">Breite/Höhe direkt eintragen, ohne Foto oder Referenzobjekt.</span>' +
+          '</button>' +
+          '<button class="card mode" data-build="plan">' +
+            '<span class="card-ic">📐</span><span class="card-t">Grundriss-/Planfoto</span>' +
+            '<span class="card-d">Ein Planfoto hochladen und mehrere Fenster/Türen darauf markieren.</span>' +
+          '</button>' +
+        '</div>';
+    },
+    mount: function () {
+      view.querySelectorAll('.mode').forEach(function (b) {
+        b.onclick = function () {
+          var w = App.state.wiz;
+          if (b.dataset.build === 'manual') {
+            w.captureMode = 'manual';
+            App.go('manualMeasure');
+          } else {
+            w.captureMode = 'plan';
+            w.planGroupId = uid();
+            w.planCount = 0;
+            App.go('capture');
+          }
+        };
+      });
+    }
+  };
+
+  /** -------- Neubau Pfad (a): Maße manuell eingeben, ganz ohne Foto -------- */
+  Screens.manualMeasure = {
+    title: function () { return 'Maße manuell eingeben'; },
+    html: function () {
+      var w = App.state.wiz;
+      var proj = Store.getProject(w.target.projectId);
+      var nextNum = proj ? proj.measurements.length + 1 : 1;
+      return '' +
+        '<p class="instruct">Kein Foto vorhanden (Neubau/Anbau) – Maße direkt eintragen. ' +
+          'Ein Plausibilitätscheck anhand einer Aufnahme entfällt dadurch.</p>' +
+        '<div class="two">' +
+          '<label class="field"><span>Breite (mm) *</span><input id="manW" type="number" min="1" placeholder="z. B. 1200"></label>' +
+          '<label class="field"><span>Höhe (mm) *</span><input id="manH" type="number" min="1" placeholder="z. B. 1400"></label>' +
+        '</div>' +
+        '<div class="meta-form">' +
+          '<label class="field"><span>Bezeichnung</span><input id="manLabel" type="text" value="' + esc(OBJECT_TYPE_TEXT[w.objectType].label) + ' ' + nextNum + '"></label>' +
+          '<div class="two">' +
+            '<label class="field"><span>Raum</span><input id="manRoom" type="text" placeholder="z. B. Bad"></label>' +
+            '<label class="field"><span>Position</span><input id="manPos" type="text" placeholder="z. B. EG links"></label>' +
+          '</div>' +
+          '<label class="field"><span>Notiz</span><textarea id="manNote" rows="2"></textarea></label>' +
+        '</div>' +
+        (w.objectType === 'door' ? doorFieldsHtml('man') : '') +
+        (w.objectType === 'window' ? windowFieldsHtml('man') : '') +
+        '<button class="btn primary big" id="manSaveBtn">Aufmaß speichern</button>';
+    },
+    mount: function () {
+      var w = App.state.wiz;
+      if (w.objectType === 'window') bindWindowFields('man');
+      document.getElementById('manSaveBtn').onclick = function () {
+        var widthMm = parseFloat(document.getElementById('manW').value);
+        var heightMm = parseFloat(document.getElementById('manH').value);
+        if (!widthMm || !heightMm || widthMm <= 0 || heightMm <= 0) {
+          toast('Bitte Breite und Höhe eingeben', 'error');
+          return;
+        }
+        Store.addMeasurement(w.target.projectId, {
+          source: 'pro',
+          objectType: w.objectType,
+          captureMode: 'manual',
+          label: document.getElementById('manLabel').value || 'Aufmaß',
+          room: document.getElementById('manRoom').value || '',
+          position: document.getElementById('manPos').value || '',
+          note: document.getElementById('manNote').value || '',
+          referenceKey: null, referenceLabel: null,
+          mmPerPx: null, refPts: [], corners: [],
+          result: { widthMm: widthMm, heightMm: heightMm, diag1Mm: null, diag2Mm: null, synthetic: true },
+          manualOverride: null,
+          imageDataUrl: null,
+          imgW: null, imgH: null,
+          doorFields: w.objectType === 'door' ? readDoorFields('man') : null,
+          windowFields: w.objectType === 'window' ? readWindowFields('man') : null
+        });
+        toast('Aufmaß gespeichert', 'success');
+        App.state.wiz = null;
+        App.go('project', { id: w.target.projectId }, { replace: true });
+      };
     }
   };
 
@@ -429,22 +622,28 @@
   /* -------- Schritt: Maßstab kalibrieren (A4-Blatt oder Strecke) -------- */
   function refNeeds(refKey) { return Geo.REFERENCES[refKey].type === 'rect' ? 4 : 2; }
 
-  function calcMmPerPx(refKey, pts) {
+  /** customMm wird nur für Referenzen ohne festes r.mm gebraucht (aktuell nur 'custom'). */
+  function calcMmPerPx(refKey, pts, customMm) {
     var r = Geo.REFERENCES[refKey];
     if (r.type === 'rect') return Geo.mmPerPxFromRect(pts, r.dims);
-    return Geo.mmPerPx(pts[0], pts[1], r.mm);
+    var mmVal = r.mm != null ? r.mm : customMm;
+    if (!mmVal || mmVal <= 0) return null;
+    return Geo.mmPerPx(pts[0], pts[1], mmVal);
   }
 
   Screens.calibrate = {
     title: function () { return 'Maßstab (1/2)'; },
     html: function () {
+      var w = App.state.wiz;
       var opts = Object.keys(Geo.REFERENCES).map(function (k) {
-        var sel = k === App.state.wiz.referenceKey ? ' selected' : '';
+        var sel = k === w.referenceKey ? ' selected' : '';
         return '<option value="' + k + '"' + sel + '>' + esc(Geo.REFERENCES[k].label) + '</option>';
       }).join('');
       return '' +
         '<p class="instruct" id="refHint"></p>' +
         '<label class="field"><span>Referenzobjekt</span><select id="refSel">' + opts + '</select></label>' +
+        '<label class="field" id="customRefWrap"><span>Bekannte Länge (mm)</span>' +
+          '<input id="customRefMm" type="number" min="1" placeholder="z. B. 1000" value="' + (w.customRefMm || '') + '"></label>' +
         '<div class="canvas-wrap"><canvas id="cv"></canvas></div>' +
         '<div class="readout" id="readout">Noch keine Punkte gesetzt</div>' +
         '<div class="actionbar">' +
@@ -458,12 +657,19 @@
       var readout = document.getElementById('readout');
       var nextBtn = document.getElementById('nextBtn');
       var refHint = document.getElementById('refHint');
+      var customWrap = document.getElementById('customRefWrap');
+      var customInput = document.getElementById('customRefMm');
+
+      function currentCustomMm() {
+        var v = parseFloat(customInput.value);
+        return isNaN(v) ? null : v;
+      }
 
       function onChange(pts) {
         w.refPts = pts;
         var need = refNeeds(w.referenceKey);
         if (pts.length === need) {
-          var mpp = calcMmPerPx(w.referenceKey, pts);
+          var mpp = calcMmPerPx(w.referenceKey, pts, currentCustomMm());
           readout.innerHTML = 'Maßstab: <b>' + (mpp ? mpp.toFixed(4) : '–') + ' mm/px</b>';
           nextBtn.disabled = !mpp;
         } else {
@@ -479,9 +685,13 @@
       function applyRef() {
         var r = Geo.REFERENCES[w.referenceKey];
         var isRect = r.type === 'rect';
+        var isCustom = w.referenceKey === 'custom';
+        customWrap.hidden = !isCustom;
         refHint.innerHTML = isRect
           ? 'Tippe die <b>4 Ecken des A4-Blatts</b> an (Reihenfolge egal). Punkte lassen sich verschieben.'
-          : 'Markiere <b>zwei Punkte</b> entlang der bekannten Länge (z. B. Kartenlänge). Punkte lassen sich verschieben.';
+          : isCustom
+            ? 'Trage die <b>bekannte Länge</b> ein (z. B. eine bemaßte Strecke auf dem Plan) und markiere ihre <b>beiden Endpunkte</b>. Punkte lassen sich verschieben.'
+            : 'Markiere <b>zwei Punkte</b> entlang der bekannten Länge (z. B. Kartenlänge). Punkte lassen sich verschieben.';
         picker.configure({
           maxPoints: isRect ? 4 : 2,
           mode: isRect ? 'window' : 'line',
@@ -499,13 +709,19 @@
         w.refPts = [];
         applyRef();
       };
+      customInput.oninput = function () {
+        w.customRefMm = currentCustomMm();
+        if (w.refPts.length === refNeeds(w.referenceKey)) onChange(w.refPts);
+      };
       document.getElementById('undoBtn').onclick = function () { picker.undo(); };
       nextBtn.onclick = function () {
         if (!picker.isComplete()) return;
         var r = Geo.REFERENCES[w.referenceKey];
-        w.mmPerPx = calcMmPerPx(w.referenceKey, w.refPts);
-        w.referenceLabel = r.label;
-        App.go('window');
+        var customMm = currentCustomMm();
+        w.mmPerPx = calcMmPerPx(w.referenceKey, w.refPts, customMm);
+        w.customRefMm = customMm;
+        w.referenceLabel = r.label + (w.referenceKey === 'custom' && customMm ? ' (' + customMm + ' mm)' : '');
+        App.go(w.captureMode === 'plan' ? 'planWindow' : 'window');
       };
     }
   };
@@ -558,6 +774,123 @@
         w.composite = cv.toDataURL('image/jpeg', 0.72);
         if (w.target.mode === 'kunde') App.go('kundeForm');
         else App.go('result');
+      };
+    }
+  };
+
+  /**
+   * -------- Neubau Pfad (b): Planfoto, mehrere Fenster/Türen nacheinander --------
+   * Ersetzt für captureMode==='plan' den Einzel-Screen Screens.window: Ecken
+   * markieren → Merkmale inline ausfüllen → „Speichern & nächstes" (Picker
+   * setzt zurück, derselbe Screen bleibt offen) oder „Fertig". Jedes
+   * gespeicherte Element bekommt dieselbe wiz.planGroupId (siehe Screens.
+   * buildMode) und ein zugeschnittenes Composite (cropCompositeFromCanvas),
+   * damit nicht bei jedem Fenster erneut das komplette Planfoto im
+   * localStorage landet.
+   */
+  Screens.planWindow = {
+    title: function () { return 'Plan: Elemente markieren'; },
+    html: function () {
+      var w = App.state.wiz;
+      var t = OBJECT_TYPE_TEXT[w.objectType];
+      return '' +
+        '<p class="instruct" id="planInstruct">' + t.instruct + '</p>' +
+        '<div class="canvas-wrap"><canvas id="cv"></canvas></div>' +
+        '<div class="readout" id="readout">0 / 4 Ecken</div>' +
+        '<div class="actionbar">' +
+          '<button class="btn ghost" id="undoBtn">Letzten Punkt zurück</button>' +
+          '<button class="btn primary" id="doneBtn" disabled>Maße übernehmen ›</button>' +
+        '</div>' +
+        '<div id="planFieldsWrap" hidden>' +
+          (w.objectType === 'door' ? doorFieldsHtml('p') : windowFieldsHtml('p')) +
+          '<div class="meta-form">' +
+            '<label class="field"><span>Bezeichnung</span><input id="pLabel" type="text" value="' + esc(t.label) + ' ' + (w.planCount + 1) + '"></label>' +
+            '<div class="two">' +
+              '<label class="field"><span>Raum</span><input id="pRoom" type="text"></label>' +
+              '<label class="field"><span>Position</span><input id="pPos" type="text"></label>' +
+            '</div>' +
+          '</div>' +
+          '<button class="btn primary big" id="saveNextBtn">Speichern &amp; nächstes Element markieren</button>' +
+        '</div>' +
+        '<p class="hint" id="planCountText">' + w.planCount + ' Element(e) auf diesem Plan bereits erfasst.</p>' +
+        '<button class="btn ghost" id="finishBtn">Fertig – zurück zum Projekt</button>';
+    },
+    mount: function () {
+      var w = App.state.wiz;
+      var t = OBJECT_TYPE_TEXT[w.objectType];
+      var cv = document.getElementById('cv');
+      var readout = document.getElementById('readout');
+      var doneBtn = document.getElementById('doneBtn');
+      var fieldsWrap = document.getElementById('planFieldsWrap');
+      var countText = document.getElementById('planCountText');
+
+      w.imgW = w.img.naturalWidth;
+      w.imgH = w.img.naturalHeight;
+
+      var picker = new Picker(cv, {
+        maxPoints: 4, mode: 'window', color: '#a472f0',
+        labels: t.cornerLabels,
+        onChange: function (pts) {
+          w.corners = pts;
+          if (pts.length === 4) {
+            var m = Geo.measure(pts, w.mmPerPx);
+            readout.innerHTML = 'Breite ≈ <b>' + fmtMm(m.widthMm) + '</b> · Höhe ≈ <b>' + fmtMm(m.heightMm) + '</b>';
+            doneBtn.disabled = false;
+          } else {
+            readout.textContent = pts.length + ' / 4 Ecken';
+            doneBtn.disabled = true;
+          }
+        }
+      });
+      App.state.picker = picker;
+      picker.setImage(w.img);
+      if (w.objectType === 'window') bindWindowFields('p');
+
+      document.getElementById('undoBtn').onclick = function () { picker.undo(); };
+
+      doneBtn.onclick = function () {
+        if (!picker.isComplete()) return;
+        fieldsWrap.hidden = false;
+      };
+
+      document.getElementById('saveNextBtn').onclick = function () {
+        if (!picker.isComplete()) { toast('Bitte zuerst 4 Ecken markieren', 'error'); return; }
+        var result = Geo.measure(w.corners, w.mmPerPx);
+        var composite = cropCompositeFromCanvas(cv, w.corners, picker.view.scale, 40);
+        var label = document.getElementById('pLabel').value || (t.label + ' ' + (w.planCount + 1));
+        Store.addMeasurement(w.target.projectId, {
+          source: 'pro',
+          objectType: w.objectType,
+          captureMode: 'plan',
+          planGroupId: w.planGroupId,
+          label: label,
+          room: document.getElementById('pRoom').value || '',
+          position: document.getElementById('pPos').value || '',
+          note: '',
+          referenceKey: w.referenceKey, referenceLabel: w.referenceLabel,
+          mmPerPx: w.mmPerPx, refPts: w.refPts, corners: w.corners,
+          result: result, manualOverride: null,
+          // Zugeschnittenes Composite ≠ Koordinatenraum von result.orderedCorners
+          // (die beziehen sich auf das volle Planfoto) — Foto-Overlay bewusst
+          // deaktiviert (imgW/imgH null), statt es falsch auszurichten.
+          imageDataUrl: composite,
+          imgW: null, imgH: null,
+          doorFields: w.objectType === 'door' ? readDoorFields('p') : null,
+          windowFields: w.objectType === 'window' ? readWindowFields('p') : null
+        });
+        w.planCount++;
+        toast('Element gespeichert – nächstes markieren', 'success');
+        picker.reset();
+        fieldsWrap.hidden = true;
+        doneBtn.disabled = true;
+        countText.textContent = w.planCount + ' Element(e) auf diesem Plan bereits erfasst.';
+        var labelInput = document.getElementById('pLabel');
+        if (labelInput) labelInput.value = t.label + ' ' + (w.planCount + 1);
+      };
+
+      document.getElementById('finishBtn').onclick = function () {
+        App.state.wiz = null;
+        App.go('project', { id: w.target.projectId }, { replace: true });
       };
     }
   };
@@ -852,9 +1185,15 @@
             var check = Geo.checkPlausibility(m.result, m.objectType);
             var badge = m.source === 'kunde' ? '<span class="src kunde">Kunde</span>' : '';
             var typeBadge = '<span class="src type">' + esc(OBJECT_TYPE_TEXT[m.objectType || 'window'].label) + '</span>';
+            var materialKey = m.windowFields && m.windowFields.fensterart;
+            var materialBadge = materialKey ? '<span class="src type">' + esc(FENSTERART_OPTIONS[materialKey] ? FENSTERART_OPTIONS[materialKey].label : materialKey) + '</span>' : '';
+            // Neubau-Pfade (a)/(b): eigene Badge, da ohne bzw. mit anderem Foto
+            // erfasst als der normale Foto-Flow (siehe Screens.buildMode).
+            var modeBadge = m.captureMode === 'manual' ? '<span class="src type">✎ Manuell</span>'
+              : m.captureMode === 'plan' ? '<span class="src type">📐 Plan</span>' : '';
             return '<div class="row meas" data-id="' + m.id + '">' +
               (m.imageDataUrl ? '<img class="thumb" src="' + m.imageDataUrl + '">' : '<div class="thumb"></div>') +
-              '<div class="row-main"><b>' + esc(m.label) + ' ' + typeBadge + ' ' + badge + '</b>' +
+              '<div class="row-main"><b>' + esc(m.label) + ' ' + typeBadge + ' ' + materialBadge + ' ' + modeBadge + ' ' + badge + '</b>' +
                 '<span>' + fmtMm(e.w) + ' × ' + fmtMm(e.h) + (m.manualOverride ? ' · korrigiert' : '') +
                 ' · Q' + check.score + '</span></div>' +
               '<span class="chev">›</span>' +
@@ -869,6 +1208,7 @@
         '</div>' +
         '<div class="toolbar">' +
           '<button class="btn primary" id="newMeas">+ Aufmaß</button>' +
+          '<button class="btn ghost" id="newBuild">+ Neubau/Planung</button>' +
           '<button class="btn ghost" id="pdfBtn">PDF-Protokoll</button>' +
           '<button class="btn ghost" id="csvBtn">CSV</button>' +
           '<button class="btn ghost danger" id="delProj">Löschen</button>' +
@@ -880,6 +1220,11 @@
       if (!p) return;
       document.getElementById('newMeas').onclick = function () {
         newWiz({ mode: 'pro', projectId: p.id });
+        App.go('objectType');
+      };
+      document.getElementById('newBuild').onclick = function () {
+        newWiz({ mode: 'pro', projectId: p.id });
+        App.state.wiz.captureMode = null; // Sentinel: Screens.objectType/.fensterart verzweigen zu buildMode
         App.go('objectType');
       };
       document.getElementById('pdfBtn').onclick = function () {
@@ -916,11 +1261,19 @@
         ? check.issues.map(function (i) { return '<li class="' + i.level + '">' + esc(i.msg) + '</li>'; }).join('')
         : '<li class="ok">Keine Auffälligkeiten.</li>';
       var isWindow = m.objectType === 'window';
+      // Neubau Pfad (b): das gespeicherte Foto ist ein Ausschnitt des
+      // Planfotos (siehe cropCompositeFromCanvas), dessen Koordinatenraum
+      // nicht mehr zu result.orderedCorners passt — Overlay bewusst
+      // ausgeblendet statt falsch ausgerichtet zu zeichnen. Pfad (a) hat
+      // ohnehin kein Foto (imageDataUrl null).
+      var showOverlay = isWindow && m.captureMode !== 'plan';
       return '' +
-        '<div class="result-img photo-overlay-wrap">' +
-          '<img id="dPhoto" src="' + (m.imageDataUrl || '') + '" alt="Aufmaß">' +
-          (isWindow ? '<div class="photo-overlay" id="dOverlay"></div>' : '') +
-        '</div>' +
+        (m.imageDataUrl
+          ? '<div class="result-img photo-overlay-wrap">' +
+              '<img id="dPhoto" src="' + m.imageDataUrl + '" alt="Aufmaß">' +
+              (showOverlay ? '<div class="photo-overlay" id="dOverlay"></div>' : '') +
+            '</div>'
+          : '<p class="hint">Kein Foto (manuell erfasst, Neubau-Pfad).</p>') +
         '<div class="measures">' +
           '<div class="measure"><span>Breite</span><b>' + fmtMm(e.w) + '</b><i>' + fmtCm(e.w) + '</i></div>' +
           '<div class="measure"><span>Höhe</span><b>' + fmtMm(e.h) + '</b><i>' + fmtCm(e.h) + '</i></div>' +
@@ -968,15 +1321,21 @@
       };
       if (m.objectType === 'window') {
         var photo = document.getElementById('dPhoto');
-        var ctx = { objectType: 'window', orderedCorners: m.result && m.result.orderedCorners };
-        function setupOverlay() {
-          // Alte Aufmaße ohne gespeicherte imgW/imgH: die Bildpixel-Maße des
-          // Komposit-Fotos entsprechen denen, gegen die die Ecken gemessen wurden.
-          ctx.imgW = m.imgW || photo.naturalWidth;
-          ctx.imgH = m.imgH || photo.naturalHeight;
-          bindWindowFields('d', ctx);
+        if (photo && m.captureMode !== 'plan') {
+          var ctx = { objectType: 'window', orderedCorners: m.result && m.result.orderedCorners };
+          var setupOverlay = function () {
+            // Alte Aufmaße ohne gespeicherte imgW/imgH: die Bildpixel-Maße des
+            // Komposit-Fotos entsprechen denen, gegen die die Ecken gemessen wurden.
+            ctx.imgW = m.imgW || photo.naturalWidth;
+            ctx.imgH = m.imgH || photo.naturalHeight;
+            bindWindowFields('d', ctx);
+          };
+          if (photo.complete && photo.naturalWidth) setupOverlay(); else photo.onload = setupOverlay;
+        } else {
+          // Kein Foto (Pfad a) oder Overlay bewusst deaktiviert (Pfad b, s. o.) —
+          // Fenster-Merkmale-Formular trotzdem verdrahten (Öffnungsart-Toggle etc.).
+          bindWindowFields('d', { objectType: 'window' });
         }
-        if (photo.complete && photo.naturalWidth) setupOverlay(); else photo.onload = setupOverlay;
         document.getElementById('saveWindowFields').onclick = function () {
           Store.updateMeasurement(params.projectId, params.id, { windowFields: readWindowFields('d') });
           toast('Merkmale gespeichert', 'success');
