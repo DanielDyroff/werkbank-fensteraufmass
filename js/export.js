@@ -28,6 +28,17 @@
   Exporter.effWidth = effWidth;
   Exporter.effHeight = effHeight;
 
+  /**
+   * Basispreis über js/calculation.js (Phase 7), analog zur gleichnamigen
+   * Hilfsfunktion in app.js — Export ist ein eigenständiges Modul und ruft
+   * daher nicht in app.js hinein (gleiches Prinzip wie fensterartLabel oben).
+   * null, wenn kein Herstellertyp gewählt, kein Fenster oder Calc fehlt.
+   */
+  function measurementPrice(m) {
+    if (m.objectType !== 'window' || !m.windowFields || !m.windowFields.herstellerTypId || !global.Calc) return null;
+    return Calc.calculatePosition(m.windowFields.herstellerTypId, effWidth(m), effHeight(m));
+  }
+
   /* ---------------- CSV ---------------- */
 
   function csvCell(v) {
@@ -37,17 +48,19 @@
   }
 
   Exporter.toCsv = function (rows) {
-    var header = ['Projekt', 'Kunde', 'Typ', 'Fensterart', 'Bezeichnung', 'Raum', 'Position',
+    var header = ['Projekt', 'Kunde', 'Typ', 'Fensterart', 'Herstellertyp', 'Bezeichnung', 'Raum', 'Position',
       'Breite_mm', 'Hoehe_mm', 'Diagonale1_mm', 'Diagonale2_mm',
-      'Korrigiert', 'Quelle', 'Erstellt', 'Notiz'];
+      'Korrigiert', 'Quelle', 'Erstellt', 'Notiz', 'Preis_EUR'];
     var lines = [header.map(csvCell).join(';')];
     rows.forEach(function (r) {
       var p = r.project, m = r.measurement;
+      var price = measurementPrice(m);
       lines.push([
         p ? p.name : 'Eingang (Kunde)',
         p && p.customer ? p.customer.name : '',
         m.objectType === 'door' ? 'Tür' : 'Fenster',
         fensterartLabel(m),
+        (m.windowFields && m.windowFields.herstellerTypId) || '',
         m.label || '',
         m.room || '',
         m.position || '',
@@ -58,7 +71,8 @@
         m.manualOverride ? 'ja' : 'nein',
         m.source === 'kunde' ? 'Kunde' : 'Profi',
         m.createdAt ? new Date(m.createdAt).toLocaleString('de-DE') : '',
-        m.note || ''
+        m.note || '',
+        price && price.ok ? price.priceEUR.toFixed(2) : ''
       ].map(csvCell).join(';'));
     });
     return '﻿' + lines.join('\r\n'); // BOM für Excel-Umlaute
@@ -79,6 +93,7 @@
   /* ---------------- PDF-Protokoll (über Druck) ---------------- */
 
   Exporter.printProtocol = function (project, measurements, company) {
+    var offerTotal = 0, offerCount = 0;
     var rows = measurements.map(function (m) {
       var check = (global.Geo && global.Geo.checkPlausibility) ? Geo.checkPlausibility(m.result, m.objectType) : { issues: [], score: '' };
       var notes = check.issues.map(function (i) { return '• ' + i.msg; }).join('<br>') || '–';
@@ -88,6 +103,16 @@
       var typeLabel = m.objectType === 'door' ? 'Tür' : 'Fenster';
       var fensterartRow = (m.objectType === 'window' && fensterartLabel(m))
         ? '<tr><th>Fensterart</th><td>' + esc(fensterartLabel(m)) + '</td></tr>' : '';
+      var price = measurementPrice(m);
+      var priceRow = '';
+      if (price) {
+        if (price.ok) {
+          priceRow = '<tr><th>Basispreis</th><td>' + price.priceEUR.toFixed(2).replace('.', ',') + ' € <span class="unverb">(Typ ' + esc(price.typId) + ', zzgl. Aufpreise)</span></td></tr>';
+          offerTotal += price.priceEUR; offerCount++;
+        } else {
+          priceRow = '<tr><th>Basispreis</th><td class="unverb">Preis auf Anfrage (' + esc(price.message) + ')</td></tr>';
+        }
+      }
       var df = m.doorFields;
       var doorRows = (m.objectType === 'door' && df) ?
         '<tr><th>Anschlag</th><td>' + esc(df.hinge || '–') + '</td></tr>' +
@@ -109,6 +134,7 @@
               '<tr><th>Referenz</th><td>' + esc(m.referenceLabel || (m.captureMode === 'manual' ? 'Manuell erfasst (ohne Foto)' : 'DIN A4 (Blatt, 4 Ecken)')) + '</td></tr>' +
               '<tr><th>Qualität</th><td>' + esc(check.score) + ' / 100' + (m.manualOverride ? ' · manuell korrigiert' : '') + '</td></tr>' +
               fensterartRow +
+              priceRow +
               doorRows +
             '</table>' +
           '</div>' +
@@ -116,6 +142,11 @@
         '</section>'
       );
     }).join('');
+    var offerHtml = offerCount
+      ? '<div class="angebot"><b>Angebotssumme (Basispreise, ' + offerCount + ' von ' + measurements.length + ' Position(en)):</b> ' +
+        offerTotal.toFixed(2).replace('.', ',') + ' € ' +
+        '<span class="unverb">zzgl. Aufpreise (Farbe/Glas/Sicherheit/Sprossen/Rollladen) und MwSt. – unverbindliche Kostenschätzung</span></div>'
+      : '';
 
     var c = company || {};
     var p = project || { name: 'Eingang', customer: {} };
@@ -144,6 +175,8 @@
       'table.masse td{font-weight:700;padding:3px 0;}' +
       'table.masse tr{border-bottom:1px solid #f1f5f9;}' +
       '.hinweise{font-size:11px;color:#475569;margin:10px 0 0;}' +
+      '.unverb{font-weight:400;color:#94a3b8;font-size:10px;}' +
+      '.angebot{background:#efe7fb;border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:13px;}' +
       '.foot{margin-top:24px;display:flex;justify-content:space-between;font-size:11px;color:#475569;}' +
       '.sig{border-top:1px solid #94a3b8;width:200px;text-align:center;padding-top:4px;}' +
       '.disclaimer{margin-top:14px;font-size:10px;color:#94a3b8;}' +
@@ -158,6 +191,7 @@
         (cust.phone ? '<div><b>Telefon:</b> ' + esc(cust.phone) + '</div>' : '') +
         '<div><b>Aufmaße:</b> ' + measurements.length + '</div>' +
       '</div>' +
+      offerHtml +
       rows +
       '<div class="foot"><div class="sig">Datum, Unterschrift Aufmaß</div>' +
         '<div class="sig">Datum, Unterschrift Kunde</div></div>' +

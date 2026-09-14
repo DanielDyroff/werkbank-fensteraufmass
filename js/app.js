@@ -271,8 +271,11 @@
    * Griffseite, Sprossen). wf (optional) füllt die Felder mit bereits
    * gespeicherten Werten vor (z. B. beim nachträglichen Bearbeiten in
    * Screens.measurement); ohne wf gelten die Defaults aus visualize.js.
+   * showPricing=false blendet Herstellertyp/Preis komplett aus (keine
+   * Auswahl, kein Preistext) — Pflicht im Kunden-Modus: „Kunde sieht nie
+   * Messergebnisse" gilt auch für daraus abgeleitete Preise (Screens.done).
    */
-  function windowFieldsHtml(prefix, wf) {
+  function windowFieldsHtml(prefix, wf, showPricing) {
     wf = wf || Visualize.DEFAULT_WINDOW_FIELDS;
     // Fensterart: bereits auf dem eigenen Auswahlscreen gewählt (App.state.wiz.fensterart);
     // beim nachträglichen Bearbeiten (wf.fensterart) hat der gespeicherte Wert Vorrang.
@@ -291,9 +294,30 @@
     var hingeL = wf.hingeSide === 'links' ? ' selected' : '', hingeR = wf.hingeSide === 'rechts' ? ' selected' : '';
     var handleR = wf.handleSide === 'rechts' ? ' selected' : '', handleL = wf.handleSide === 'links' ? ' selected' : '';
     var mullH = (wf.mullions && wf.mullions.h) || 0, mullV = (wf.mullions && wf.mullions.v) || 0;
+    // Herstellertyp/Preis: nur für fensterart='kunststoff' verfügbar, weil
+    // js/calculation.js bislang nur dafür ein Preisraster hat (Pilot-Umfang,
+    // siehe Plan_Kalkulation-Angebotserstellung.md Abschnitt 8). Block bleibt
+    // im Markup immer vorhanden und wird von bindWindowFields ein-/ausgeblendet,
+    // je nachdem welche Fensterart gerade gewählt ist (kein Re-Render nötig).
+    // Im Kunden-Modus (showPricing===false) entfällt der Block komplett.
+    var hasPreisliste = currentFensterart === 'kunststoff';
+    var typOpts = '<option value="">– kein Typ gewählt –</option>' +
+      (global.Calc ? Object.keys(Calc.RASTER).map(function (id) {
+        var t = Calc.RASTER[id];
+        var sel = id === (wf.herstellerTypId || '') ? ' selected' : '';
+        return '<option value="' + id + '"' + sel + '>Typ ' + id + ' – ' + esc(t.kuerzel) + ' – ' + esc(t.bezeichnung) + '</option>';
+      }).join('') : '');
+    var pricingHtml = showPricing === false ? '' : ('' +
+      '<label class="field" id="' + prefix + 'WTypWrap"' + (hasPreisliste ? '' : ' hidden') + '>' +
+        '<span>Herstellertyp (Preisliste)</span><select id="' + prefix + 'WTyp">' + typOpts + '</select>' +
+      '</label>' +
+      '<div class="price-info" id="' + prefix + 'WPrice"></div>' +
+      '<p class="hint" id="' + prefix + 'WNoPreis"' + (hasPreisliste ? ' hidden' : '') + '>' +
+        'Für diese Fensterart liegt noch keine Preisliste vor – Kalkulation folgt, sobald verfügbar.</p>');
     return '' +
       '<div class="meta-form window-fields">' +
         '<label class="field"><span>Fensterart</span><select id="' + prefix + 'WMaterial">' + fensterartOpts + '</select></label>' +
+        pricingHtml +
         '<div class="two">' +
           '<label class="field"><span>Öffnungsart</span><select id="' + prefix + 'WOpening">' + openingOpts + '</select></label>' +
           '<label class="field"><span>Flügelzahl</span><select id="' + prefix + 'WSash">' + sashOpts + '</select></label>' +
@@ -317,8 +341,10 @@
   function readWindowFields(prefix) {
     var mullH = parseInt(document.getElementById(prefix + 'WMullH').value, 10);
     var mullV = parseInt(document.getElementById(prefix + 'WMullV').value, 10);
+    var typSel = document.getElementById(prefix + 'WTyp');
     return {
       fensterart: document.getElementById(prefix + 'WMaterial').value,
+      herstellerTypId: (typSel && typSel.value) || null,
       sashCount: parseInt(document.getElementById(prefix + 'WSash').value, 10) || 1,
       openingType: document.getElementById(prefix + 'WOpening').value,
       hingeSide: document.getElementById(prefix + 'WHinge').value,
@@ -328,24 +354,62 @@
   }
 
   /**
+   * Berechnet den Basispreis (js/calculation.js, Phase 7) für den aktuell im
+   * Formular gewählten Herstellertyp und zeigt ihn in #<prefix>WPrice an.
+   * widthMm/heightMm müssen vom Aufrufer übergeben werden (Kalkulation kennt
+   * die App-Maß-Logik nicht) — ohne sie erscheint ein Platzhaltertext statt
+   * eines (falschen) Preises. Bewusst nur Basispreis: keine Aufpreise für
+   * Farbe/Glas/Sicherheit/Sprossen/Rollladen in diesem Pilot-Umfang.
+   */
+  function updateWindowPrice(prefix, widthMm, heightMm) {
+    var priceEl = document.getElementById(prefix + 'WPrice');
+    if (!priceEl) return;
+    var typSel = document.getElementById(prefix + 'WTyp');
+    var typId = typSel && typSel.value;
+    if (!typId || !global.Calc) { priceEl.innerHTML = ''; return; }
+    if (!widthMm || !heightMm) {
+      priceEl.innerHTML = '<span class="muted">Preis: Maße noch nicht bekannt.</span>';
+      return;
+    }
+    var res = Calc.calculatePosition(typId, widthMm, heightMm);
+    priceEl.innerHTML = res.ok
+      ? 'Basispreis: <b>' + res.priceEUR.toFixed(2).replace('.', ',') + ' €</b> (gerundet auf ' +
+        String(res.roundedWidthCm).replace('.', ',') + '×' + String(res.roundedHeightCm).replace('.', ',') + ' cm) ' +
+        '<span class="muted">· zzgl. Aufpreise, unverbindliche Kostenschätzung</span>'
+      : '<span class="muted">Preis auf Anfrage (' + esc(res.message) + ')</span>';
+  }
+
+  /**
    * Verdrahtet den Fenster-Formularblock: blendet die Bänderseite bei
-   * Öffnungsarten ohne Seiten-Scharnier aus und zeichnet bei jeder Änderung
-   * die Foto-Overlay-Vorschau (falls ein #<prefix>Overlay-Container existiert)
-   * neu. ctx ist optional {imgW, imgH, orderedCorners, objectType}; ohne ctx
-   * wird der aktuelle Wizard-Zustand (App.state.wiz) verwendet — so
-   * funktioniert derselbe Helper sowohl im Mess-Wizard als auch beim
-   * nachträglichen Bearbeiten eines bereits gespeicherten Aufmaßes.
+   * Öffnungsarten ohne Seiten-Scharnier aus, blendet den Herstellertyp-/
+   * Preis-Block je nach gewählter Fensterart ein/aus, zeichnet bei jeder
+   * Änderung die Foto-Overlay-Vorschau (falls ein #<prefix>Overlay-Container
+   * existiert) neu und aktualisiert den Preis. ctx ist optional {imgW, imgH,
+   * orderedCorners, objectType, widthMm, heightMm}; ohne ctx wird der
+   * aktuelle Wizard-Zustand (App.state.wiz) verwendet — so funktioniert
+   * derselbe Helper sowohl im Mess-Wizard als auch beim nachträglichen
+   * Bearbeiten eines bereits gespeicherten Aufmaßes.
    */
   function bindWindowFields(prefix, ctx) {
     var openingSel = document.getElementById(prefix + 'WOpening');
     var hingeWrap = document.getElementById(prefix + 'WHingeWrap');
-    var suffixes = ['WOpening', 'WSash', 'WHinge', 'WHandle', 'WMullH', 'WMullV'];
+    var materialSel = document.getElementById(prefix + 'WMaterial');
+    var typWrap = document.getElementById(prefix + 'WTypWrap');
+    var noPreisEl = document.getElementById(prefix + 'WNoPreis');
+    var suffixes = ['WOpening', 'WSash', 'WHinge', 'WHandle', 'WMullH', 'WMullV', 'WMaterial', 'WTyp'];
     function update() {
       if (openingSel && hingeWrap) {
         var hide = ['kipp', 'schiebe', 'hebeschiebe', 'fest'].indexOf(openingSel.value) >= 0;
         hingeWrap.style.display = hide ? 'none' : '';
       }
+      if (materialSel && typWrap && noPreisEl) {
+        var hasPreisliste = materialSel.value === 'kunststoff';
+        typWrap.hidden = !hasPreisliste;
+        noPreisEl.hidden = hasPreisliste;
+      }
       renderWindowOverlay(prefix, ctx);
+      var wh = ctx || {};
+      updateWindowPrice(prefix, wh.widthMm, wh.heightMm);
     }
     suffixes.forEach(function (suffix) {
       var el = document.getElementById(prefix + suffix);
@@ -527,7 +591,18 @@
     },
     mount: function () {
       var w = App.state.wiz;
-      if (w.objectType === 'window') bindWindowFields('man');
+      var manWEl = document.getElementById('manW'), manHEl = document.getElementById('manH');
+      if (w.objectType === 'window') {
+        bindWindowFields('man');
+        // Breite/Höhe werden hier erst im Formular selbst eingegeben (kein
+        // Foto) — eigene Live-Kopplung für den Preis, da bindWindowFields nur
+        // auf die Fenster-Merkmale hört, nicht auf Maß-Felder.
+        var updateManPrice = function () {
+          updateWindowPrice('man', parseFloat(manWEl.value), parseFloat(manHEl.value));
+        };
+        manWEl.addEventListener('input', updateManPrice);
+        manHEl.addEventListener('input', updateManPrice);
+      }
       document.getElementById('manSaveBtn').onclick = function () {
         var widthMm = parseFloat(document.getElementById('manW').value);
         var heightMm = parseFloat(document.getElementById('manH').value);
@@ -844,13 +919,25 @@
       });
       App.state.picker = picker;
       picker.setImage(w.img);
-      if (w.objectType === 'window') bindWindowFields('p');
+      // priceCtx wird per Referenz an bindWindowFields gereicht: solange kein
+      // Aufmaß vorliegt, bleibt widthMm/heightMm undefined (Preis zeigt
+      // "Maße noch nicht bekannt"); doneBtn befüllt es, danach sieht auch ein
+      // späterer Herstellertyp-Wechsel (via bindWindowFields' eigenem
+      // Change-Listener) das richtige Maß.
+      var priceCtx = {};
+      if (w.objectType === 'window') bindWindowFields('p', priceCtx);
 
       document.getElementById('undoBtn').onclick = function () { picker.undo(); };
 
       doneBtn.onclick = function () {
         if (!picker.isComplete()) return;
         fieldsWrap.hidden = false;
+        if (w.objectType === 'window') {
+          var m = Geo.measure(w.corners, w.mmPerPx);
+          priceCtx.widthMm = m.widthMm;
+          priceCtx.heightMm = m.heightMm;
+          updateWindowPrice('p', m.widthMm, m.heightMm);
+        }
       };
 
       document.getElementById('saveNextBtn').onclick = function () {
@@ -909,7 +996,7 @@
         '<label class="field"><span>Bezeichnung ' + esc(OBJECT_TYPE_TEXT[w.objectType].label) + '</span><input id="kLabel" type="text" placeholder="z. B. Wohnzimmer links"></label>' +
         '<label class="field"><span>Notiz</span><textarea id="kNote" rows="2" placeholder="Anmerkungen"></textarea></label>' +
         (w.objectType === 'door' ? doorFieldsHtml('k') : '') +
-        (w.objectType === 'window' ? windowFieldsHtml('k') : '') +
+        (w.objectType === 'window' ? windowFieldsHtml('k', null, false) : '') +
         '<button class="btn primary big" id="submitBtn">Aufmaß übermitteln</button>';
     },
     mount: function () {
@@ -1000,7 +1087,18 @@
     },
     mount: function () {
       var w0 = App.state.wiz;
-      if (w0.objectType === 'window') bindWindowFields('m');
+      if (w0.objectType === 'window') {
+        // Voller Kontext nötig: sobald ctx nicht mehr falsy ist, greift der
+        // interne Overlay-Fallback in renderWindowOverlay nicht mehr — also
+        // imgW/imgH/orderedCorners/objectType hier selbst mitgeben, nicht nur
+        // die für den Preis neuen widthMm/heightMm.
+        bindWindowFields('m', {
+          imgW: w0.imgW, imgH: w0.imgH,
+          orderedCorners: w0.result && w0.result.orderedCorners,
+          objectType: w0.objectType,
+          widthMm: w0.result.widthMm, heightMm: w0.result.heightMm
+        });
+      }
       document.getElementById('saveBtn').onclick = function () {
         var w = App.state.wiz;
         var ov = null;
@@ -1126,6 +1224,19 @@
     };
   }
 
+  /**
+   * Berechnet den Basispreis eines Fenster-Aufmaßes über den vom Nutzer
+   * gewählten Herstellertyp (js/calculation.js, Phase 7) und das effektive
+   * Maß (manuelle Korrektur hat Vorrang). null, wenn kein Typ gewählt, kein
+   * Fenster oder Calc nicht geladen — sonst das Lookup-Ergebnis (ok:true/
+   * false, siehe Calc.lookupBasePrice).
+   */
+  function measurementPrice(m) {
+    if (m.objectType !== 'window' || !m.windowFields || !m.windowFields.herstellerTypId || !global.Calc) return null;
+    var e = eff(m);
+    return Calc.calculatePosition(m.windowFields.herstellerTypId, e.w, e.h);
+  }
+
   function assignInbox(measurementId) {
     var projects = Store.listProjects();
     if (!projects.length) { toast('Erst ein Projekt anlegen'); return; }
@@ -1179,6 +1290,7 @@
       var p = Store.getProject(params.id);
       if (!p) return '<p class="empty">Projekt nicht gefunden.</p>';
       var cust = p.customer || {};
+      var offerTotal = 0, offerCount = 0;
       var list = p.measurements.length
         ? p.measurements.map(function (m) {
             var e = eff(m);
@@ -1191,15 +1303,26 @@
             // erfasst als der normale Foto-Flow (siehe Screens.buildMode).
             var modeBadge = m.captureMode === 'manual' ? '<span class="src type">✎ Manuell</span>'
               : m.captureMode === 'plan' ? '<span class="src type">📐 Plan</span>' : '';
+            var price = measurementPrice(m);
+            var priceText = '';
+            if (price) {
+              if (price.ok) { priceText = ' · ' + price.priceEUR.toFixed(2).replace('.', ',') + ' €'; offerTotal += price.priceEUR; offerCount++; }
+              else { priceText = ' · Preis auf Anfrage'; }
+            }
             return '<div class="row meas" data-id="' + m.id + '">' +
               (m.imageDataUrl ? '<img class="thumb" src="' + m.imageDataUrl + '">' : '<div class="thumb"></div>') +
               '<div class="row-main"><b>' + esc(m.label) + ' ' + typeBadge + ' ' + materialBadge + ' ' + modeBadge + ' ' + badge + '</b>' +
                 '<span>' + fmtMm(e.w) + ' × ' + fmtMm(e.h) + (m.manualOverride ? ' · korrigiert' : '') +
-                ' · Q' + check.score + '</span></div>' +
+                ' · Q' + check.score + esc(priceText) + '</span></div>' +
               '<span class="chev">›</span>' +
             '</div>';
           }).join('')
         : '<p class="empty">Noch kein Aufmaß. Starte das erste.</p>';
+      var offerHtml = offerCount
+        ? '<div class="quality qgood">Angebotssumme (Basispreise, ' + offerCount + ' von ' + p.measurements.length +
+          ' Position(en)): <b>' + offerTotal.toFixed(2).replace('.', ',') + ' €</b> ' +
+          '<span class="muted">· zzgl. Aufpreise, unverbindliche Kostenschätzung</span></div>'
+        : '';
       return '' +
         '<div class="cust-card">' +
           '<div><b>' + esc(cust.name || 'ohne Kunde') + '</b></div>' +
@@ -1213,6 +1336,7 @@
           '<button class="btn ghost" id="csvBtn">CSV</button>' +
           '<button class="btn ghost danger" id="delProj">Löschen</button>' +
         '</div>' +
+        offerHtml +
         '<div class="section"><h3>Aufmaße <span class="count">' + p.measurements.length + '</span></h3>' + list + '</div>';
     },
     mount: function (params) {
@@ -1320,9 +1444,10 @@
         App.go('measurement', params, { replace: true });
       };
       if (m.objectType === 'window') {
+        var e = eff(m);
         var photo = document.getElementById('dPhoto');
         if (photo && m.captureMode !== 'plan') {
-          var ctx = { objectType: 'window', orderedCorners: m.result && m.result.orderedCorners };
+          var ctx = { objectType: 'window', orderedCorners: m.result && m.result.orderedCorners, widthMm: e.w, heightMm: e.h };
           var setupOverlay = function () {
             // Alte Aufmaße ohne gespeicherte imgW/imgH: die Bildpixel-Maße des
             // Komposit-Fotos entsprechen denen, gegen die die Ecken gemessen wurden.
@@ -1333,8 +1458,9 @@
           if (photo.complete && photo.naturalWidth) setupOverlay(); else photo.onload = setupOverlay;
         } else {
           // Kein Foto (Pfad a) oder Overlay bewusst deaktiviert (Pfad b, s. o.) —
-          // Fenster-Merkmale-Formular trotzdem verdrahten (Öffnungsart-Toggle etc.).
-          bindWindowFields('d', { objectType: 'window' });
+          // Fenster-Merkmale-Formular trotzdem verdrahten (Öffnungsart-Toggle etc.),
+          // Maße für die Live-Preisanzeige aber trotzdem mitgeben.
+          bindWindowFields('d', { objectType: 'window', widthMm: e.w, heightMm: e.h });
         }
         document.getElementById('saveWindowFields').onclick = function () {
           Store.updateMeasurement(params.projectId, params.id, { windowFields: readWindowFields('d') });
