@@ -102,10 +102,22 @@
       bodentief: {
         vollstaendig: false,
         typen: [
-          { typId: '713-716', kuerzel: 'HST', bezeichnung: 'Hebe-Schiebe-Tür (Typenbereich, wie Balkontür)' }
+          { typId: '713-716', kuerzel: 'HST', bezeichnung: 'Hebe-Schiebe-Tür (Typenbereich, wie Balkontür)' },
+          // Bestätigt bei der Preisdigitalisierung für js/calculation.js (Phase 7):
+          // Typ 111 ist laut Original-Preisliste explizit die "Französisches
+          // Fenster (ohne Trittschutz)"-Ausführung, also bodentief.
+          { typId: '111', kuerzel: 'DKT', bezeichnung: 'Bodentiefes Dreh-Kipp-Fenster (Französisches Fenster, ohne Trittschutz)' }
+        ]
+      },
+      // Bestätigt bei der Preisdigitalisierung für js/calculation.js (Phase 7):
+      // Typ 102 ist im Original-Preisliste-Index direkt als "FEST" geführt.
+      festverglasung: {
+        vollstaendig: false,
+        typen: [
+          { typId: '102', kuerzel: 'FEST', bezeichnung: 'Festverglasung, einflügelig' }
         ]
       }
-      // festverglasung, fenster-festes-element, mit-oberlicht, mit-unterlicht,
+      // fenster-festes-element, mit-oberlicht, mit-unterlicht,
       // mit-ober-unterlicht, fenster-tuer-kombination, sonderform,
       // nicht-eindeutig: bislang kein Eintrag. Laut Kalkulationsplan
       // (Abschnitt 4) ist Ober-/Unterlicht insbesondere nicht über eine

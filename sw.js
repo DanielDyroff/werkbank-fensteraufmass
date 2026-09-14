@@ -1,5 +1,5 @@
 /* Service Worker — einfacher Offline-Cache (App-Shell). */
-var CACHE = 'aufmass-v10';
+var CACHE = 'aufmass-v11';
 var ASSETS = [
   './',
   './index.html',
@@ -7,6 +7,7 @@ var ASSETS = [
   './js/geometry.js',
   './js/visualize.js',
   './js/typenmatrix.js',
+  './js/calculation.js',
   './js/store.js',
   './js/picker.js',
   './js/export.js',
